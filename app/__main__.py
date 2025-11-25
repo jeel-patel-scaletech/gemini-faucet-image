@@ -68,18 +68,36 @@ def ensure_session_state() -> None:
         st.session_state.catalog_context = build_catalog_context(CATALOG_DIR)
 
 
-def call_model(message_text: str, image_bytes: Optional[bytes], image_mime: Optional[str]) -> str:
-    user_parts = []
-    prompt_text = message_text.strip() if message_text.strip() else "Find the best match for this faucet from the catalog."
-    user_parts.append(Part.from_text(text=prompt_text))
+def build_conversation_contents(messages: List[ChatMessage]) -> List[Content]:
+    conversation_contents: List[Content] = []
+    for message in messages:
+        parts = []
+        text_value = (message.get("text") or "").strip()
+        if text_value:
+            parts.append(Part.from_text(text=text_value))
+        elif message["role"] == "user" and message.get("image_bytes"):
+            parts.append(Part.from_text(text="Find the best match for this faucet from the catalog."))
 
-    if image_bytes:
-        user_parts.append(Part.from_bytes(data=image_bytes, mime_type=image_mime or "image/png"))
+        if message["role"] == "user":
+            image_bytes = message.get("image_bytes")
+            if image_bytes:
+                parts.append(
+                    Part.from_bytes(data=image_bytes, mime_type=message.get("image_mime") or "image/png")
+                )
 
+        if not parts:
+            continue
+
+        conversation_contents.append(Content(role=message["role"], parts=parts))
+
+    return conversation_contents
+
+
+def call_model(messages: List[ChatMessage]) -> str:
     contents = [
         Content(role="user", parts=[Part.from_text(text=SYSTEM_PROMPT)]),
         *st.session_state.catalog_context,
-        Content(role="user", parts=user_parts),
+        *build_conversation_contents(messages),
     ]
 
     response = client.models.generate_content(model=MODEL_NAME, contents=contents)
@@ -91,7 +109,9 @@ def call_model(message_text: str, image_bytes: Optional[bytes], image_mime: Opti
 def render_chat_history(messages: List[ChatMessage]) -> None:
     for message in messages:
         with st.chat_message(message["role"]):
-            st.write(message.get("text", ""))
+            display_text = message.get("text") or ("(Image only)" if message.get("image_bytes") else "")
+            if display_text:
+                st.write(display_text)
             if image_bytes := message.get("image_bytes"):
                 st.image(image_bytes, caption="Uploaded faucet", width=320)
 
@@ -131,7 +151,7 @@ def main() -> None:
         st.session_state.messages.append(
             ChatMessage(
                 role="user",
-                text=text if text else "(Image only)",
+                text=text,
                 image_bytes=image_bytes if image_bytes else None,
                 image_mime=image_mime if image_mime else None,
             )
@@ -139,7 +159,7 @@ def main() -> None:
 
         with st.spinner("Finding the best match..."):
             try:
-                assistant_text = call_model(text, image_bytes, image_mime)
+                assistant_text = call_model(st.session_state.messages)
             except Exception as exc:
                 st.session_state.messages.append(
                     ChatMessage(role="assistant", text=f"Error calling Gemini: {exc}")
