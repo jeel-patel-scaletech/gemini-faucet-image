@@ -43,7 +43,14 @@ def load_image_metadata(metadata_file: str) -> Dict[str, Any]:
 
     try:
         with open(metadata_path, "r", encoding="utf-8") as fp:
-            return json.load(fp)
+            k = json.load(fp)
+            for key, entry in k.items():
+                k[key] = {
+                    'Title' : entry['Title'],
+                    'Brand' : entry['Brand'],
+                    'VarDim_Color' : entry['VarDim_Color'],
+                }
+            return k
     except json.JSONDecodeError:
         return {}
 
