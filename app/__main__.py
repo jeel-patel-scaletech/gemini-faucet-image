@@ -1,5 +1,6 @@
+import json
 from pathlib import Path
-from typing import List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -17,6 +18,7 @@ SYSTEM_PROMPT = (
     "Explain your reasoning correctly about why did you make the decision of choosing a specific product."
 )
 CATALOG_DIR = "input_images"
+IMAGE_METADATA_FILE = "image_metadata.json"
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 client = genai.Client()
@@ -34,7 +36,25 @@ def read_bytes(file_path: Path) -> bytes:
         return fp.read()
 
 
-def build_catalog_context(directory: str) -> List[Content]:
+def load_image_metadata(metadata_file: str) -> Dict[str, Any]:
+    metadata_path = Path(metadata_file)
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        with open(metadata_path, "r", encoding="utf-8") as fp:
+            return json.load(fp)
+    except json.JSONDecodeError:
+        return {}
+
+
+def format_metadata(metadata: Dict[str, Any]) -> str:
+    if not metadata:
+        return "No additional metadata provided."
+    return json.dumps(metadata, ensure_ascii=False, separators=(",", ": "))
+
+
+def build_catalog_context(directory: str, metadata_map: Dict[str, Any]) -> List[Content]:
     catalog_path = Path(directory)
     if not catalog_path.exists():
         return []
@@ -49,11 +69,13 @@ def build_catalog_context(directory: str) -> List[Content]:
 
         image_bytes = read_bytes(file_path)
         mime_type = "image/png" if file_path.suffix.lower() == ".png" else "image/jpeg"
+        metadata_text = format_metadata(metadata_map.get(file_path.name, {}))
+
         contents.append(
             Content(
                 role="user",
                 parts=[
-                    Part.from_text(text=file_path.name),
+                    Part.from_text(text=f"{file_path.name}\nMetadata: {metadata_text}"),
                     Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 ],
             )
@@ -66,7 +88,8 @@ def ensure_session_state() -> None:
     if "messages" not in st.session_state:
         st.session_state.messages: List[ChatMessage] = []
     if "catalog_context" not in st.session_state:
-        st.session_state.catalog_context = build_catalog_context(CATALOG_DIR)
+        st.session_state.image_metadata = load_image_metadata(IMAGE_METADATA_FILE)
+        st.session_state.catalog_context = build_catalog_context(CATALOG_DIR, st.session_state.image_metadata)
 
 
 def build_conversation_contents(messages: List[ChatMessage]) -> List[Content]:
