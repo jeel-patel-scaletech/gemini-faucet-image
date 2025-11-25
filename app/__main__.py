@@ -1,93 +1,154 @@
-import os
-from google import genai
-from typing import TypedDict
-from google.genai.types import CreateCachedContentConfig, HttpOptions, Content, Part
+from pathlib import Path
+from typing import List, Literal, Optional, TypedDict
+
+import streamlit as st
 from dotenv import load_dotenv
+from google import genai
+from google.genai.types import Content, Part
 
 load_dotenv()
 
 MODEL_NAME = "gemini-2.0-flash-lite"
+SYSTEM_PROMPT = (
+    "You are an expert plumbing inventory assistant. "
+    "You have access to a specific catalog of faucet images (provided in context) with filenames. "
+    "Your job is to visually compare a user-provided photo against this catalog "
+    "and identify the specific catalog item that matches best."
+)
+CATALOG_DIR = "input_images"
+SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
 
 client = genai.Client()
 
 
-def read_bytes(file_path: str) -> bytes:
+class ChatMessage(TypedDict, total=False):
+    role: Literal["user", "assistant"]
+    text: str
+    image_bytes: bytes
+    image_mime: str
+
+
+def read_bytes(file_path: Path) -> bytes:
     with open(file_path, "rb") as fp:
         return fp.read()
 
 
-content_from_files = [
-    Content(
-        role="user",
-        parts = [
-          Part.from_text(text = file_path),
-          Part.from_bytes(data=read_bytes(f"input_images/{file_path}"), mime_type="image/png")
-        ]
-    )
-    for file_path in os.listdir("input_images")
-]
+def build_catalog_context(directory: str) -> List[Content]:
+    catalog_path = Path(directory)
+    if not catalog_path.exists():
+        return []
 
-# cached_dataset = client.caches.create(
-#     model = MODEL_NAME,
-#     config = CreateCachedContentConfig(
-#         ttl = f"{24 * 60 * 60}s",
-#         display_name = "Faucet Images Dataset Cache",
-#         contents = content_from_files,
-#         system_instruction = (
-#           "You are an expert plumbing inventory assistant. "
-#           "You have access to a specific catalog of faucet images (provided in context). "
-#           "Your job is to visually compare a user-provided photo against this catalog "
-#           "and identify the specific catalog item that matches best."
-#         )
-#     )
-# )
+    contents: List[Content] = []
+    for file_path in sorted(catalog_path.iterdir()):
+        if not file_path.is_file():
+            continue
 
-print(content_from_files)
-# print(cached_dataset)
+        if file_path.suffix.lower() not in SUPPORTED_IMAGE_EXTENSIONS:
+            continue
+
+        image_bytes = read_bytes(file_path)
+        mime_type = "image/png" if file_path.suffix.lower() == ".png" else "image/jpeg"
+        contents.append(
+            Content(
+                role="user",
+                parts=[
+                    Part.from_text(text=file_path.name),
+                    Part.from_bytes(data=image_bytes, mime_type=mime_type),
+                ],
+            )
+        )
+
+    return contents
 
 
-class FaucetMatch(TypedDict):
-    best_match_filename: str
-    confidence_level: str
-    reasoning: str
-    is_exact_match: bool
+def ensure_session_state() -> None:
+    if "messages" not in st.session_state:
+        st.session_state.messages: List[ChatMessage] = []
+    if "catalog_context" not in st.session_state:
+        st.session_state.catalog_context = build_catalog_context(CATALOG_DIR)
 
 
-with open("query_image/fancy.png", "rb") as query:
-    QUERY_IMAGE_BYTES = query.read()
+def call_model(message_text: str, image_bytes: Optional[bytes], image_mime: Optional[str]) -> str:
+    user_parts = []
+    prompt_text = message_text.strip() if message_text.strip() else "Find the best match for this faucet from the catalog."
+    user_parts.append(Part.from_text(text=prompt_text))
 
-response = client.models.generate_content(
-    model=MODEL_NAME,
-    contents=[
-        Content(
-            role="user",
-            parts=[
-                Part.from_text(
-                    text=(
-                        "You are an expert plumbing inventory assistant. "
-                        "You have access to a specific catalog of faucet images (provided in context) with filenames. "
-                        "Your job is to visually compare a user-provided photo against this catalog "
-                        "and identify the specific catalog item that matches best."
-                    )
-                ),
-            ],
-        ),
-        *content_from_files,
-        Content(
-            role="user",
-            parts=[
-                Part.from_text(
-                    text="Find the best match for this given faucet from the previously uploaded set of images. Make sure to provide the file name."
-                ),
-                Part.from_bytes(data=QUERY_IMAGE_BYTES, mime_type="image/png"),
-            ],
-        ),
-    ],
-)
+    if image_bytes:
+        user_parts.append(Part.from_bytes(data=image_bytes, mime_type=image_mime or "image/png"))
 
-print("\n--- API RESPONSE (RAW) ---")
-print(response)
-print("\n--- API RESPONSE (JSON) ---")
-print(response.text)
+    contents = [
+        Content(role="user", parts=[Part.from_text(text=SYSTEM_PROMPT)]),
+        *st.session_state.catalog_context,
+        Content(role="user", parts=user_parts),
+    ]
 
-# # cache.delete()
+    response = client.models.generate_content(model=MODEL_NAME, contents=contents)
+    if response.text:
+        return response.text.strip()
+    return "The model did not return any text."
+
+
+def render_chat_history(messages: List[ChatMessage]) -> None:
+    for message in messages:
+        with st.chat_message(message["role"]):
+            st.write(message.get("text", ""))
+            if image_bytes := message.get("image_bytes"):
+                st.image(image_bytes, caption="Uploaded faucet", width=320)
+
+
+def main() -> None:
+    st.set_page_config(page_title="Faucet Finder", page_icon="🛠️")
+    st.title("Faucet Finder Chat")
+    st.caption("Ask the assistant to identify faucets and upload photos when needed.")
+
+    ensure_session_state()
+
+    if not st.session_state.catalog_context:
+        st.error(f"No catalog images found in `{CATALOG_DIR}`. Add images to continue.")
+        return
+
+    render_chat_history(st.session_state.messages)
+
+    with st.form("chat-input", clear_on_submit=True):
+        user_message = st.text_area("Message", placeholder="Describe the faucet or ask for help...", height=80)
+        uploaded_file = st.file_uploader(
+            "Optional: upload a faucet photo", type=["png", "jpg", "jpeg"], accept_multiple_files=False
+        )
+        submitted = st.form_submit_button("Send")
+
+    if submitted:
+        text = user_message.strip()
+        if not text and uploaded_file is None:
+            st.warning("Please enter a message or upload an image before sending.")
+            st.stop()
+
+        image_bytes: Optional[bytes] = None
+        image_mime: Optional[str] = None
+        if uploaded_file:
+            image_bytes = uploaded_file.read()
+            image_mime = uploaded_file.type or "image/png"
+
+        st.session_state.messages.append(
+            ChatMessage(
+                role="user",
+                text=text if text else "(Image only)",
+                image_bytes=image_bytes if image_bytes else None,
+                image_mime=image_mime if image_mime else None,
+            )
+        )
+
+        with st.spinner("Finding the best match..."):
+            try:
+                assistant_text = call_model(text, image_bytes, image_mime)
+            except Exception as exc:
+                st.session_state.messages.append(
+                    ChatMessage(role="assistant", text=f"Error calling Gemini: {exc}")
+                )
+            else:
+                st.session_state.messages.append(ChatMessage(role="assistant", text=assistant_text))
+
+        st.rerun()
+
+
+if __name__ == "__main__":
+    main()
