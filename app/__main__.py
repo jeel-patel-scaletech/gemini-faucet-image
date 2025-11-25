@@ -2,7 +2,7 @@ import json
 import mimetypes
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, TypedDict, cast
+from typing import Any, Dict, List, Optional, Sequence, TypedDict, cast
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -33,6 +33,12 @@ class FaucetMatch(TypedDict):
     confidence_level: str
     reasoning: str
     is_exact_match: bool
+
+
+class UploadedImage(TypedDict):
+    name: str
+    bytes: bytes
+    mime: str
 
 
 def _read_bytes(file_path: Path) -> bytes:
@@ -79,18 +85,33 @@ def load_catalog_contents() -> tuple[List[Content], List[Dict[str, bytes]]]:
 
 def run_match(
     question: str,
-    image_bytes: bytes,
-    image_mime: Optional[str],
+    user_images: List[UploadedImage],
     catalog_contents: List[Content],
 ) -> tuple[Optional[FaucetMatch], str]:
+    if not user_images:
+        raise ValueError("At least one user image is required to run a match.")
+
+    attachment_summary = ", ".join(image["name"] for image in user_images)
     contents = [
         Content(role="user", parts=[Part.from_text(text=SYSTEM_PROMPT)]),
         *catalog_contents,
         Content(
             role="user",
             parts=[
-                Part.from_text(text=f"{JSON_INSTRUCTION}\n\nUser question: {question}"),
-                Part.from_bytes(data=image_bytes, mime_type=image_mime or "image/png"),
+                Part.from_text(
+                    text=(
+                        f"{JSON_INSTRUCTION}\n\nUser question: {question}\n"
+                        f"Attached images: {attachment_summary}"
+                    )
+                ),
+                *(
+                    part
+                    for image in user_images
+                    for part in (
+                        Part.from_text(text=f"Photo: {image['name']}"),
+                        Part.from_bytes(data=image["bytes"], mime_type=image["mime"]),
+                    )
+                ),
             ],
         ),
     ]
@@ -108,28 +129,33 @@ def run_match(
 def init_session_state() -> None:
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
+    if "uploader_key" not in st.session_state:
+        st.session_state["uploader_key"] = 0
 
 
 def render_sidebar(previews: List[Dict[str, bytes]]) -> None:
-    st.sidebar.header("Query Image")
-    uploaded_file = st.sidebar.file_uploader("Upload a faucet image", type=["png", "jpg", "jpeg"])
-    if uploaded_file:
-        st.session_state["query_image"] = uploaded_file.getvalue()
-        st.session_state["query_image_name"] = uploaded_file.name
-        uploaded_mime = uploaded_file.type or _guess_mime_type(Path(uploaded_file.name))
-        st.session_state["query_image_mime"] = uploaded_mime or "image/png"
-
-    if st.session_state.get("query_image"):
-        st.sidebar.image(st.session_state["query_image"], caption=st.session_state.get("query_image_name", "Uploaded image"))
-    else:
-        st.sidebar.warning("Upload a faucet image to begin.")
-
-    with st.sidebar.expander("Catalog preview", expanded=False):
+    st.sidebar.header("Catalog Preview")
+    with st.sidebar.expander("Reference catalog", expanded=False):
         st.write(f"{len(previews)} catalog images loaded.")
         cols = st.columns(3)
         for idx, preview in enumerate(previews):
             with cols[idx % 3]:
                 st.image(preview["bytes"], caption=preview["name"], use_container_width=True)
+    st.sidebar.info("Attach as many faucet photos as you need directly from the main chat input.")
+
+
+def _serialize_uploaded_files(uploaded_files: Optional[Sequence[Any]]) -> List[UploadedImage]:
+    images: List[UploadedImage] = []
+    if not uploaded_files:
+        return images
+
+    for uploaded_file in uploaded_files:
+        file_name = getattr(uploaded_file, "name", "uploaded-image")
+        file_bytes = uploaded_file.getvalue()
+        file_mime = getattr(uploaded_file, "type", None) or _guess_mime_type(Path(file_name))
+        images.append({"name": file_name, "bytes": file_bytes, "mime": file_mime or "image/png"})
+
+    return images
 
 
 def render_chat_interface(catalog_contents: List[Content]) -> None:
@@ -145,30 +171,58 @@ def render_chat_interface(catalog_contents: List[Content]) -> None:
             )
             if message.get("raw"):
                 chat.code(message["raw"], language="json")
+            if message.get("images"):
+                for image in message["images"]:
+                    chat.image(image["bytes"], caption=image["name"], use_container_width=True)
         else:
             content = message.get("content")
             if content:
                 chat.markdown(content)
+            if message.get("images"):
+                for image in message["images"]:
+                    chat.image(image["bytes"], caption=image["name"], use_container_width=True)
             if message.get("raw"):
                 chat.code(message["raw"], language="json")
+
+    uploader_key = st.session_state.get("uploader_key", 0)
+    uploaded_files = st.file_uploader(
+        "Attach faucet photo(s)",
+        type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True,
+        key=f"chat_uploader_{uploader_key}",
+    )
+    pending_images = _serialize_uploaded_files(uploaded_files)
+
+    if pending_images:
+        st.caption(f"{len(pending_images)} image(s) attached for the next message.")
+        cols = st.columns(min(3, len(pending_images)))
+        for idx, image in enumerate(pending_images):
+            with cols[idx % len(cols)]:
+                st.image(image["bytes"], caption=image["name"], use_container_width=True)
 
     user_prompt = st.chat_input("Ask about the faucet or request a comparison")
     if not user_prompt:
         return
 
-    if not st.session_state.get("query_image"):
-        st.warning("Upload an image in the sidebar before asking a question.")
+    if not pending_images:
+        st.warning("Attach at least one faucet image before sending a question.")
         return
 
-    st.session_state["messages"].append({"role": "user", "content": user_prompt})
-    st.chat_message("user").markdown(user_prompt)
+    user_message: Dict[str, Any] = {"role": "user", "content": user_prompt}
+    if pending_images:
+        user_message["images"] = pending_images
+    st.session_state["messages"].append(user_message)
+
+    user_chat = st.chat_message("user")
+    user_chat.markdown(user_prompt)
+    for image in pending_images:
+        user_chat.image(image["bytes"], caption=image["name"], use_container_width=True)
 
     with st.chat_message("assistant"):
         with st.spinner("Comparing faucet image..."):
             match, raw_text = run_match(
                 question=user_prompt,
-                image_bytes=st.session_state["query_image"],
-                image_mime=st.session_state.get("query_image_mime", "image/png"),
+                user_images=pending_images,
                 catalog_contents=catalog_contents,
             )
 
@@ -185,6 +239,7 @@ def render_chat_interface(catalog_contents: List[Content]) -> None:
             st.code(raw_text)
 
         st.session_state["messages"].append(assistant_message)
+        st.session_state["uploader_key"] = uploader_key + 1
 
 
 def main() -> None:
