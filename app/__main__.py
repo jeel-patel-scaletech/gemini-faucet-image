@@ -13,7 +13,8 @@ SYSTEM_PROMPT = (
     "You are an expert plumbing inventory assistant. "
     "You have access to a specific catalog of faucet images (provided in context) with filenames. "
     "Your job is to visually compare a user-provided photo against this catalog "
-    "and identify the specific catalog item that matches best."
+    "and identify the specific catalog item that matches best. "
+    "Explain your reasoning correctly about why did you make the decision of choosing a specific product."
 )
 CATALOG_DIR = "input_images"
 SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
