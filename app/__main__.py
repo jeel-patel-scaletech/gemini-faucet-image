@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict, Type
 
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 from google.genai.types import Content, Part
+from pydantic import BaseModel, Field, ValidationError
 
 load_dotenv()
 
@@ -14,9 +15,23 @@ SYSTEM_PROMPT = (
     "You are an expert plumbing inventory assistant. "
     "You have access to a specific catalog of faucet images (provided in context) with filenames. "
     "Your job is to visually compare a user-provided photo against this catalog "
-    "and identify the specific catalog item that matches best. "
-    "Explain your reasoning correctly about why did you make the decision of choosing a specific product. "
-    "Be smart about detecting colors as they can have reflections of other things."
+    "and identify the specific catalog items that match best. "
+    "Always respond with JSON that follows this schema exactly:\n"
+    '{\n'
+    '  "matches": [\n'
+    "    {\n"
+    '      "filename": "<catalog filename>",\n'
+    '      "title": "<title or empty string>",\n'
+    '      "brand": "<brand or empty string>",\n'
+    '      "color": "<color or empty string>",\n'
+    '      "confidence": <number between 0 and 1>,\n'
+    '      "reasoning": "<short explanation>"\n'
+    "    }\n"
+    "  ]\n"
+    "}\n"
+    "Return exactly three entries in the matches array (sorted by confidence, "
+    "highest first) and only reference filenames that exist in the provided catalog. "
+    "Do not output any explanation outside of this JSON."
 )
 CATALOG_DIR = "input_images"
 IMAGE_METADATA_FILE = "image_metadata.json"
@@ -30,6 +45,48 @@ class ChatMessage(TypedDict, total=False):
     text: str
     image_bytes: bytes
     image_mime: str
+    matches: List[Dict[str, Any]]
+
+
+class FaucetMatchModel(BaseModel):
+    filename: str
+    title: Optional[str] = ""
+    brand: Optional[str] = ""
+    color: Optional[str] = ""
+    confidence: float = Field(ge=0.0, le=1.0)
+    reasoning: str
+
+
+class FaucetResponseModel(BaseModel):
+    matches: List[FaucetMatchModel]
+
+
+def _validate_model(model_cls: Type[BaseModel], data: Any) -> BaseModel:
+    validator = getattr(model_cls, "model_validate", None)
+    if callable(validator):
+        return validator(data)
+    parse_obj = getattr(model_cls, "parse_obj")
+    return parse_obj(data)
+
+
+def _model_to_dict(model: BaseModel) -> Dict[str, Any]:
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
+
+
+def parse_model_response(response_text: str) -> FaucetResponseModel:
+    print(response_text)
+    try:
+        data = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Model response was not valid JSON.") from exc
+
+    parsed = _validate_model(FaucetResponseModel, data)
+    matches = parsed.matches
+    # if len(matches) != 3:
+        # raise ValueError("Model response must contain exactly three matches.")
+    return parsed
 
 
 def read_bytes(file_path: Path) -> bytes:
@@ -132,20 +189,46 @@ def call_model(messages: List[ChatMessage]) -> str:
         *build_conversation_contents(messages),
     ]
 
-    response = client.models.generate_content(model=MODEL_NAME, contents=contents)
-    if response.text:
-        return response.text.strip()
-    return "The model did not return any text."
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=contents,
+    )
+    if not response.text:
+        return "The model did not return any text."
+    resp_text = response.text.strip()
+    resp_text = resp_text.removeprefix('```json')
+    resp_text = resp_text.removeprefix('```')
+    resp_text = resp_text.removesuffix('```')
+
+    return resp_text
 
 
 def render_chat_history(messages: List[ChatMessage]) -> None:
     for message in messages:
         with st.chat_message(message["role"]):
+            matches = message.get("matches") or []
             display_text = message.get("text") or ("(Image only)" if message.get("image_bytes") else "")
-            if display_text:
+            if display_text and not matches:
                 st.write(display_text)
             if image_bytes := message.get("image_bytes"):
                 st.image(image_bytes, caption="Uploaded faucet", width=320)
+            if matches:
+                st.json({"matches": matches})
+                for idx, match in enumerate(matches, start=1):
+                    filename = match.get("filename", "Unknown file")
+                    confidence = match.get("confidence")
+                    reasoning = match.get("reasoning", "")
+                    st.markdown(f"**Match {idx}: {filename} (confidence: {confidence:.2f})**" if isinstance(confidence, (int, float)) else f"**Match {idx}: {filename}**")
+                    if reasoning:
+                        st.write(reasoning)
+                    metadata = st.session_state.image_metadata.get(filename, {})
+                    if metadata:
+                        st.caption(f"Title: {metadata.get('Title', 'N/A')} | Brand: {metadata.get('Brand', 'N/A')} | Color: {metadata.get('VarDim_Color', 'N/A')}")
+                    image_path = Path(CATALOG_DIR) / filename
+                    if image_path.exists():
+                        st.image(str(image_path), caption=f"Catalog image: {filename}", width=320)
+                    else:
+                        st.warning(f"Catalog image `{filename}` was not found.")
 
 
 def main() -> None:
@@ -197,7 +280,27 @@ def main() -> None:
                     ChatMessage(role="assistant", text=f"Error calling Gemini: {exc}")
                 )
             else:
-                st.session_state.messages.append(ChatMessage(role="assistant", text=assistant_text))
+                try:
+                    parsed_response = parse_model_response(assistant_text)
+                except (ValidationError, ValueError) as exc:
+                    st.session_state.messages.append(
+                        ChatMessage(
+                            role="assistant",
+                            text=(
+                                "Failed to decode the model response as valid faucet matches. "
+                                f"Please try again. Details: {exc}"
+                            ),
+                        )
+                    )
+                else:
+                    response_dict = _model_to_dict(parsed_response)
+                    st.session_state.messages.append(
+                        ChatMessage(
+                            role="assistant",
+                            text=json.dumps(response_dict, indent=2),
+                            matches=[_model_to_dict(match) for match in parsed_response.matches],
+                        )
+                    )
 
         st.rerun()
 
