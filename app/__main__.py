@@ -15,7 +15,8 @@ SYSTEM_PROMPT = (
     "You have access to a specific catalog of faucet images (provided in context) with filenames. "
     "Your job is to visually compare a user-provided photo against this catalog "
     "and identify the specific catalog item that matches best. "
-    "Explain your reasoning correctly about why did you make the decision of choosing a specific product."
+    "Explain your reasoning correctly about why did you make the decision of choosing a specific product. "
+    "Be smart about detecting colors as they can have reflections of other things."
 )
 CATALOG_DIR = "input_images"
 IMAGE_METADATA_FILE = "image_metadata.json"
