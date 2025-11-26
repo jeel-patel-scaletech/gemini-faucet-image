@@ -213,7 +213,7 @@ def render_chat_history(messages: List[ChatMessage]) -> None:
             if image_bytes := message.get("image_bytes"):
                 st.image(image_bytes, caption="Uploaded faucet", width=320)
             if matches:
-                st.json({"matches": matches})
+                st.json({"matches": matches }, expanded = False)
                 for idx, match in enumerate(matches, start=1):
                     filename = match.get("filename", "Unknown file")
                     confidence = match.get("confidence")
