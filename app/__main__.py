@@ -16,8 +16,10 @@ SYSTEM_PROMPT = (
     "You have access to a specific catalog of faucet images (provided in context) with filenames. "
     "Your job is to visually compare a user-provided photo against this catalog "
     "and identify the specific catalog items that match best. "
+    "If you do not have any DIRECT matches, respond with the best matches in array and include a helpful message."
     "Always respond with JSON that follows this schema exactly:\n"
     '{\n'
+    '  "message": "<optional text to the user>",\n'
     '  "matches": [\n'
     "    {\n"
     '      "filename": "<catalog filename>",\n'
@@ -31,7 +33,8 @@ SYSTEM_PROMPT = (
     "}\n"
     "Return exactly three entries in the matches array (sorted by confidence, "
     "highest first) and only reference filenames that exist in the provided catalog. "
-    "Do not output any explanation outside of this JSON."
+    "Do not output any explanation outside of this JSON. "
+    "You can also ask questions to user to better filter your results."
 )
 CATALOG_DIR = "input_images"
 IMAGE_METADATA_FILE = "image_metadata.json"
@@ -46,6 +49,7 @@ class ChatMessage(TypedDict, total=False):
     image_bytes: bytes
     image_mime: str
     matches: List[Dict[str, Any]]
+    assistant_message: str
 
 
 class FaucetMatchModel(BaseModel):
@@ -58,6 +62,7 @@ class FaucetMatchModel(BaseModel):
 
 
 class FaucetResponseModel(BaseModel):
+    message: Optional[str] = ""
     matches: List[FaucetMatchModel]
 
 
@@ -207,8 +212,11 @@ def render_chat_history(messages: List[ChatMessage]) -> None:
     for message in messages:
         with st.chat_message(message["role"]):
             matches = message.get("matches") or []
+            assistant_message = message.get("assistant_message")
             display_text = message.get("text") or ("(Image only)" if message.get("image_bytes") else "")
-            if display_text and not matches:
+            if assistant_message:
+                st.write(assistant_message)
+            if display_text and not matches and not assistant_message:
                 st.write(display_text)
             if image_bytes := message.get("image_bytes"):
                 st.image(image_bytes, caption="Uploaded faucet", width=320)
@@ -294,11 +302,13 @@ def main() -> None:
                     )
                 else:
                     response_dict = _model_to_dict(parsed_response)
+                    assistant_message = response_dict.get("message") or ""
                     st.session_state.messages.append(
                         ChatMessage(
                             role="assistant",
                             text=json.dumps(response_dict, indent=2),
                             matches=[_model_to_dict(match) for match in parsed_response.matches],
+                            assistant_message=assistant_message,
                         )
                     )
 
