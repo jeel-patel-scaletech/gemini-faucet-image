@@ -16,6 +16,10 @@ SYSTEM_PROMPT = (
     "You have access to a specific catalog of faucet images (provided in context) with filenames. "
     "Your job is to visually compare a user-provided photo against this catalog "
     "and identify the specific catalog items that match best. "
+    "Prioritize the faucet silhouette and primary shape (spout arc, handle count, mounting style) "
+    "before considering secondary cues like finish, hardware details, or branding. "
+    "When shapes feel close, refine the comparison by highlighting smaller distinguishing traits "
+    "so the user understands why each candidate was chosen. "
     "If you do not have any DIRECT matches, respond with the best matches in array and include a helpful message."
     "Always respond with JSON that follows this schema exactly:\n"
     '{\n'
@@ -112,6 +116,7 @@ def load_image_metadata(metadata_file: str) -> Dict[str, Any]:
                     'Title' : entry['Title'],
                     'Brand' : entry['Brand'],
                     'VarDim_Color' : entry['VarDim_Color'],
+                    'VarDim_ColorCode' : entry['VarDim_ColorCode'],
                 }
             return k
     except json.JSONDecodeError:
