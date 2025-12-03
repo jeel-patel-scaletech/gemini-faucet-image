@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemini-call-app
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount input images directory for easy updates
+      - ./input_images:/app/input_images:ro
+      # Mount metadata files for easy updates
+      - ./image_metadata.json:/app/image_metadata.json:ro
+      - ./image_list.json:/app/image_list.json:ro
+    environment:
+      # Streamlit configuration
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      # Load environment variables from .env file if it exists
+      # - ${GOOGLE_API_KEY:-}
+    env_file:
+      - .env
+    restart: unless-stopped
