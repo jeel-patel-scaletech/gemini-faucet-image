@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# Other
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+.DS_Store
+
+# Optional: exclude other files that aren't needed
+sheet.py
+list_images.py
+
